@@ -110,7 +110,7 @@ def get_download_info(extension_info, target_platform):
         # Find version matching our platform
         for version in versions:
             target = version.get('targetPlatform', '')
-            if target.lower() == target_platform.lower():
+            if target.lower() == target_platform.lower() or target == '':
                 version_str = version.get('version')
                 download_url = None
                 
@@ -130,13 +130,15 @@ def get_download_info(extension_info, target_platform):
     except (KeyError, IndexError) as e:
         raise ValueError(f'Failed to parse extension info: {str(e)}')
 
-def build_dependency_tree(extension, target_platform, visited=None):
+def build_dependency_tree(extension, target_platform, download_deps=True, visited=None):
     """Build a dependency tree for the extension."""
     if visited is None:
         visited = set()
     
+    # If extension already processed, return None to avoid duplicate references in dependency tree
     if extension.key in visited:
-        return extension
+        print(f'Skip already processed extension: {extension.key}')
+        return None
     
     visited.add(extension.key)
     print(f'Querying extension: {extension.key}')
@@ -149,14 +151,20 @@ def build_dependency_tree(extension, target_platform, visited=None):
     extension.version = version
     extension.download_url = download_url
     
-    # Process dependencies
-    if dependencies:
+    # Process dependencies only if download_deps is True
+    if download_deps and dependencies:
         print(f'Found dependencies: {dependencies}')
         for dep in dependencies:
             try:
                 dep_publisher, dep_id = dep.split('.')
                 dep_extension = Extension(dep_publisher, dep_id)
-                extension.dependencies.append(build_dependency_tree(dep_extension, target_platform, visited))
+                # Check if this dependency has already been processed
+                if dep_extension.key not in visited:
+                    dep_result = build_dependency_tree(dep_extension, target_platform, download_deps, visited)
+                    if dep_result:
+                        extension.dependencies.append(dep_result)
+                else:
+                    print(f'Skip duplicate dependency: {dep_publisher}.{dep_id}')
             except Exception as e:
                 print(f'Warning: Failed to process dependency {dep}: {str(e)}')
     
@@ -245,20 +253,28 @@ def download_extension(extension, index, total, output_dir='downloads'):
     else:
         raise Exception('Download failed after all retries')
 
-def install_extensions(downloaded_files):
-    """Install downloaded extensions in Windsurf."""
-    windsurf_cli = '/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf'
-    
-    if not os.path.exists(windsurf_cli):
-        print('Windsurf not found. Please make sure it is installed in /Applications')
+def install_extensions(downloaded_files, ide_choice='windsurf'):
+    """Install downloaded extensions in the selected IDE (Windsurf or Cursor)."""
+    if ide_choice == 'windsurf':
+        cli_path = '/Applications/Windsurf.app/Contents/Resources/app/bin/windsurf'
+        ide_name = 'Windsurf'
+    elif ide_choice == 'cursor':
+        cli_path = '/Applications/Cursor.app/Contents/Resources/app/bin/code'
+        ide_name = 'Cursor'
+    else:
+        print(f'Unknown IDE choice: {ide_choice}')
         return False
     
-    print('\nInstalling extensions in Windsurf...')
+    if not os.path.exists(cli_path):
+        print(f'{ide_name} not found. Please make sure it is installed in /Applications')
+        return False
+    
+    print(f'\nInstalling extensions in {ide_name}...')
     for file in downloaded_files:
         print(f'Installing {os.path.basename(file)}...')
         try:
             result = subprocess.run(
-                [windsurf_cli, '--install-extension', file],
+                [cli_path, '--install-extension', file],
                 capture_output=True,
                 text=True,
                 check=True
@@ -287,12 +303,17 @@ def main():
         target_platform = get_target_platform()
         print(f'Detected platform: {target_platform}')
         
-        # Build dependency tree
-        print('\nAnalyzing dependencies...')
-        root = build_dependency_tree(extension, target_platform)
+        # Build dependency tree (only process dependencies if download_deps is True)
+        print('\nAnalyzing extension...')
+        root = build_dependency_tree(extension, target_platform, download_deps)
+        
+        # Ensure root is not None
+        if not root:
+            print('Failed to process the extension. Exiting.')
+            sys.exit(1)
         
         downloaded_files = []
-        if download_deps:
+        if download_deps and root.dependencies:
             # Get download order (dependencies first)
             download_list = get_download_order(root)
             total = len(download_list)
@@ -312,11 +333,21 @@ def main():
             downloaded_files.append(output_path)
             print(f'Successfully downloaded: {output_path}')
         
-        # Ask to install in Windsurf
+        # Ask to install in an IDE
         if downloaded_files:
-            install = input('\nInstall extensions in Windsurf? (y/N): ').strip().lower() == 'y'
+            install = input('\nInstall extensions in an IDE? (y/N): ').strip().lower() == 'y'
             if install:
-                install_extensions(downloaded_files)
+                print("\nSelect IDE:")
+                print("1. Windsurf")
+                print("2. Cursor")
+                ide_choice = input("Enter choice (1/2): ").strip()
+                
+                if ide_choice == "1":
+                    install_extensions(downloaded_files, 'windsurf')
+                elif ide_choice == "2":
+                    install_extensions(downloaded_files, 'cursor')
+                else:
+                    print("Invalid choice. Skipping installation.")
         
     except Exception as e:
         print(f'Error: {str(e)}')
